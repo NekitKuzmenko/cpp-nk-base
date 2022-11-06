@@ -118,6 +118,7 @@ unsigned char set_methods_queue_active[256];
         <path length><full path to part with number or string type for adding value><value length><value>
 
 
+
     using functions(recomended to client library):
         db.exists(path);
         db.createPart(path, name, type);
@@ -136,6 +137,9 @@ unsigned char set_methods_queue_active[256];
         db...();
         db...();
         db.sendGroup(); // or db.resetGroup() to reset group of requests
+    db...() command after calling db.group() will not send requests, but they will add new requests in client's request buffer. after calling db.sendGroup() requests will be sent. db.sendGroup() is blocking function and after receiving response from database this function will return responses in order equals order of requests
+
+    also for convenience are recomended functions db.findPart() and part.findPart(). it will just add path of current part to beginning of requesting path
 
 */
 
