@@ -4,7 +4,8 @@
 #include <sys/stat.h>
 
 struct {
-    char* path = (char*)"./DB"; //path to directory with db files (edit only this param of config)
+    char* path = (char*)"./DB"; //path to directory with db files
+    unsigned short get_threads_limit = 10;
     char* db;
     char* connector;
     char* statuses;
@@ -34,15 +35,15 @@ long last_input_writing;
 long last_input_reading;
 int input_size;
 
-uint8_t getting_active = 0, setting_active = 0, writing_active = 0;
+unsigned short getting_active = 0, setting_active = 0, writing_active = 0;
 
 struct set_method_params {
+    unsigned short session;
+    unsigned short request;
     unsigned char method;
     unsigned short path_length;
-    unsigned short name_length;
     unsigned long value_length;
     char* path;
-    char* name;
     char* value;
 };
 
@@ -50,6 +51,25 @@ set_method_params set_methods_queue[256];
 unsigned char set_methods_queue_active[256];
 
 /*
+
+    <null symbol> = <0x00>
+
+    data structure:
+        <part name><null symbol><part type><offset to next part>
+
+    data structure example:
+        <part 1><0x00><5><offset to part "part 2"><internal part 1 of "part 1"><0x00><6><offset to internal part 2 of "part 1"><number value of internal part 1 of "part 1"><internal part 2 of "part 1"><0x00><7><offset to end of "part 1", becouse "part 2" is last internal part of "part 1"><string value of "part 2">
+
+    you can make unimit count of structure levels. this data structure is like to json
+
+    part types:
+        1: structure with 8-bit offset index(max length of part — 256 bytes)
+        2: structure with 16-bit offset index(max length of part — 65536 bytes)
+        3: structure with 24-bit offset index(max length of part — 16777216 bytes)
+        4: structure with 32-bit offset index(max length of part — 4.3*10^9 bytes)
+        5: structure with 64-bit offset index(max length of part — 1.85*10^19 bytes)
+        6: number value
+        7: string value
 
     path is full path to part(example: "part1", "part1<0x00>part2") or 0x00 to main catalog of database. in part's name are allowed all ascii symbols except null symbol, which will be automatically deleted from part's name during creating part
 
@@ -62,61 +82,61 @@ unsigned char set_methods_queue_active[256];
         0x05: number
         0x06: string
 
-    in request every method must be in structure: <method><output><method params length><method params>
+    in request every method must be in structure: <method><method params length><method params>
     for doing a lot methods in one request you need to write methods one after one: <method 1><method 1 params length><method 1 params><method 2><method 2 params length><method 2 params>
 
     method params length is 16-bit integer
 
     methods list
 
+    methodID: method name
+        request structure
+        response structure
+
     1: check for exists and part type
         <path>
+        <0(doesn't exist) || 1(exists)><part type(equal methodID: 2(structure with 8-bit offset index, etc..))>
 
-    2: create structure part with 8-bit offset index(max length of part: 256 bytes)
+    2: create structure part with 8-bit offset index(max length of one internal part: 256 bytes)
         <path with part's name to create(example: "part1<0x00>part2<0x00>new_part" where "part1<0x00>part2<0x00>" is path to creating and "new_part" is name of new part, "<0x00>new_part" where "<0x00>" means main catalog of database and "new_part" is name of new part)>
-    
-    3: create structure part with 16-bit offset index(max length of one internal part: 65536 bytes)
-        request equal "creating structure part with 8-bit offset index"
-    
-    4: create structure part with 24-bit offset index(max length of part: 16777216 bytes)
-        request equal "creating structure part with 8-bit offset index"
-    
-    5: create structure part with 32-bit offset index(max length of part: 4.3*10^9 bytes)
-        request equal "creating structure part with 8-bit offset index"
-    
-    6: create structure part with 64-bit offset index(max length of part: 1.85*10^19 bytes)
-        request equal "creating structure part with 8-bit offset index"
+        <0(success) || 1(last part(not new part's name) in path doesn't exist)>
 
-    7: create number value part
+    3: create part with number value
         <path with part's name to create(example: "part1<0x00>part2<0x00>new_part" where "part1<0x00>part2<0x00>" is path to creating and "new_part" is name of new part, "<0x00>new_part" where "<0x00>" means main catalog of database and "new_part" is name of new part)>
-    
-    8: create string value part
+        <0(success) || 1(last part(not new part's name) in path doesn't exist)>
+
+    4: create part with string value
         <path with part's name to create(example: "part1<0x00>part2<0x00>new_part" where "part1<0x00>part2<0x00>" is path to creating and "new_part" is name of new part, "<0x00>new_part" where "<0x00>" means main catalog of database and "new_part" is name of new part)>
-    
-    9: delete part
+        <0(success) || 1(last part(not new part's name) in path doesn't exist)>
+
+    5: delete part
         <path with part's name to delete(example: "part1<0x00>part2<0x00>part_to_delete" where "part1<0x00>part2<0x00>" is path to part and "part_to_delete" is name of part for deleting, "<0x00>part_to_delete" where "<0x00>" means main catalog of database and "part_to_delete" is name of part for deleting)>
-    
-    10: get all
-        <full path to structure part>
+        <0(success) || 1(part doesn't exist)>
 
-    10: get
+    6: get all
+        <full path to structure part>
+        <0(success) || 1(part doesn't exist)><names of internal parts, splited by null symbol>
+
+    7: get
         <full path to part with number or string value>
+        <0(success) || 1(part doesn't exist) || 2(this is structure part)><value length><number or string value, number value must be formed byte by byte depends on value length>
     
-    11: get many
-        <path length><full path to part with internal parts with number or string value><parts list's length><parts with number or string value, splited by null symbol>
-    
-    12: get from all
+    8: get many
+        <path length><full path to part with internal parts with number or string value><parts list's length(16-bit integer)>
+        <0(success) || 1(part doesn't exist)><all requested parts
+
+    9: get from all
         <path length><full path to part with internal structure parts><part length><part with number or string value, which will be gotten from all parts in specified in first param path>
+        <0(success) || 1(part doesn't exist) || 2(this structure part haven't internal parts with number or string value)><1th part name><>
     
-    13: get many from all
+    10: get many from all
         <path length><full path to part with internal structure parts><parts length><parts with number or string value, splited by null symbol, which will be gotten from all parts in specified in first param path>
     
-    14: set
+    11: set
         <path length><full path to part with number or string type for setting value><value length><value>
     
-    15: add
+    12: add
         <path length><full path to part with number or string type for adding value><value length><value>
-
 
 
     using functions(recomended to client library):
@@ -302,6 +322,10 @@ void get_methods(unsigned short session, unsigned short request, unsigned char m
 
     }
 
+    //writing response
+
+    getting_active--;
+
 }
 
 
@@ -324,9 +348,29 @@ void set_methods() {
 
                 } else if(set_methods_queue[i].method == 3) {
 
-                } //else...
+                } else if(set_methods_queue[i].method == 4) {
+
+                } else if(set_methods_queue[i].method == 5) {
+
+                } else if(set_methods_queue[i].method == 6) {
+
+                } else if(set_methods_queue[i].method == 7) {
+
+                } else if(set_methods_queue[i].method == 8) {
+
+                } else if(set_methods_queue[i].method == 9) {
+
+                } else if(set_methods_queue[i].method == 15) {
+
+                } else if(set_methods_queue[i].method == 16) {
+
+                }
 
                 set_methods_queue_active[i] = 0;
+
+                setting_active = 0;
+
+                //writing response
 
             }
 
